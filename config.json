@@ -1,0 +1,15 @@
+{
+  "apps": [],
+  "allow_ips": [],
+  "allow_countries": [],
+  "app_actions": {},
+  "interval_sec": 3,
+  "grace_sec": 0,
+  "kill_after_grace": false,
+  "watch_proxy": true,
+  "notifications": true,
+  "probe_route": "system",
+  "check_ipv6": true,
+  "route_check": true,
+  "dns_check": "warn"
+}
