@@ -1,4 +1,4 @@
-﻿# VPNGuard - управление сетевым kill switch (брандмауэр Windows).
+﻿# AiGuard - управление сетевым kill switch (брандмауэр Windows).
 #   -Install    включить: правила + задача планировщика, которая обновляет их сама (нужны права администратора)
 #   -Uninstall  выключить: удалить правила и задачу (нужны права администратора)
 #   -Sync       обновить правила (так запускает задача планировщика)
@@ -35,7 +35,7 @@ function Test-Admin {
 function Invoke-Sync {
     $cfg = Read-VGFwConfig $ConfigFile
     if ($cfg.Apps.Count -eq 0) {
-        FwLog 'Нет отмеченных программ (или все в исключениях): правила VPNGuard удаляются.'
+        FwLog 'Нет отмеченных программ (или все в исключениях): правила AiGuard удаляются.'
         if (-not $DryRun) { Remove-VGFwRules; Write-VGFwStatus $StatusFile @() @() 'нет программ' }
         return
     }
@@ -76,7 +76,7 @@ function Register-SyncTask {
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggers -Principal $principal -Settings $settings `
-        -Description 'VPNGuard: обновляет правила брандмауэра, чтобы выбранные программы ходили в интернет только через VPN.' -Force | Out-Null
+        -Description 'AiGuard: обновляет правила брандмауэра, чтобы выбранные программы ходили в интернет только через защищённое соединение.' -Force | Out-Null
     # Окно VPNGuard (без прав администратора) может только запустить эту задачу, чтобы сразу применить
     # новый список программ. Изменить задачу или правила напрямую оно по-прежнему не может.
     try {
