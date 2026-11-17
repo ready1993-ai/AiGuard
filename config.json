@@ -11,5 +11,6 @@
   "probe_route": "system",
   "check_ipv6": true,
   "route_check": true,
-  "dns_check": "warn"
+  "dns_check": "warn",
+  "firewall_exclude": []
 }

@@ -6,7 +6,7 @@ $field = [Drawing.ColorTranslator]::FromHtml('#1D2A3D')
 $ink = [Drawing.ColorTranslator]::FromHtml('#E8EEF7')
 $muted = [Drawing.ColorTranslator]::FromHtml('#9DAEC5')
 $accent = [Drawing.ColorTranslator]::FromHtml('#73E2C1')
-$form.Text = 'VPNGuard  •  Контроль соединения'
+$form.Text = 'AiGuard  •  Контроль соединения'
 $form.ClientSize = New-Object Drawing.Size(1080,760)
 $form.BackColor = $bg; $form.ForeColor = $ink
 $form.AutoScaleMode = 'Dpi'
@@ -48,7 +48,7 @@ function Label-At($parent,$x,$y,$w,$h,$text,$size=10,$color=$ink) {
     $c.ForeColor = $color; $parent.Controls.Add($c); return $c
 }
 $side = New-Ctl Panel 0 0 218 760; $side.BackColor = $surface; $form.Controls.Add($side)
-Label-At $side 25 30 180 35 'VPNGuard' 22 $accent | Out-Null
+Label-At $side 25 30 180 35 'AiGuard' 22 $accent | Out-Null
 Label-At $side 27 72 175 24 'ВАШЕ СОЕДИНЕНИЕ' 8 $muted | Out-Null
 Label-At $side 26 625 170 44 "Локальная защита`nБез аккаунта и облака" 9 $muted | Out-Null
 Label-At $side 26 704 170 24 'DESKTOP  /  2.0' 9 $muted | Out-Null
@@ -84,10 +84,12 @@ function Show-Page($name) {
     }
     if ($name -eq 'Журнал') { Refresh-Log }
     if ($name -eq 'Диагностика') { Refresh-Diagnostics }
+    if ($name -eq 'Брандмауэр') { Fill-FwPage }
 }
 $diag = New-Ctl Panel 20 16 774 440; $hostPanel.Controls.Add($diag); $script:pages['Диагностика'] = $diag
+$fwPage = New-Ctl Panel 20 16 774 440; $hostPanel.Controls.Add($fwPage); $script:pages['Брандмауэр'] = $fwPage; $fwPage.Visible = $false
 $navY = 135
-foreach ($name in @('Обзор','Приложения','Доступ','Поведение','Диагностика','Журнал')) {
+foreach ($name in @('Обзор','Приложения','Доступ','Поведение','Брандмауэр','Диагностика','Журнал')) {
     $b = New-Ctl Button 16 $navY 186 46 ('   ' + $name)
     $b.Tag = $name; $b.TextAlign = 'MiddleLeft'; $side.Controls.Add($b); $script:navButtons[$name] = $b
     $b.Add_Click({ param($sender,$e) Show-Page $sender.Tag }); $navY += 54
@@ -140,25 +142,25 @@ $btnExe.Add_Click({
     $dialog.Dispose()
 })
 # Clarify guarantees: sampling and suspension are not a network firewall.
-foreach ($c in $appsPage.Controls) { if ($c -is [Windows.Forms.Label] -and $c.Top -eq 10) { $c.Text = 'Выберите процессы для контроля. При обрыве VPN применяются общие или индивидуальные правила.' } }
+foreach ($c in $appsPage.Controls) { if ($c -is [Windows.Forms.Label] -and $c.Top -eq 10) { $c.Text = 'Выберите процессы для контроля. При обрыве соединения применяются общие или индивидуальные правила.' } }
 $g1.Text = 'Разрешённые IP / подсети CIDR'
 foreach ($box in @($g1,$g2)) {
     foreach ($c in $box.Controls) { $c.Left = [int]($c.Left * 1.34); $c.Width = [int]($c.Width * 1.34) }
 }
-$rbFreeze.Text = 'Только заморозить до восстановления VPN'
-$chkProxy.Text = 'Следить за отключением VPN-прокси и TUN-адаптера'
-foreach ($c in $g3.Controls) { if ($c -is [Windows.Forms.Label] -and $c.Top -eq 118) { $c.Text = 'Заморозка сохраняет процесс, но не заменяет сетевой kill switch.' } }
+$rbFreeze.Text = 'Только заморозить до восстановления соединения'
+$chkProxy.Text = 'Следить за отключением прокси и адаптера туннеля (TUN)'
+foreach ($c in $g3.Controls) { if ($c -is [Windows.Forms.Label] -and $c.Top -eq 118) { $c.Text = 'Заморозка сохраняет процесс. Полная блокировка сети — вкладка «Брандмауэр».' } }
 Label-At $script:pages['Поведение'] 18 374 730 44 'Во время первой проверки приложения временно заморожены. Пауза защиты снимает ограничения.' 9 $muted | Out-Null
 
 Label-At $diag 0 0 760 32 'Диагностика соединения' 18 | Out-Null
-Label-At $diag 0 40 760 40 'Ответы независимых сервисов, состояние прокси и активные VPN-адаптеры.' 10 $muted | Out-Null
+Label-At $diag 0 40 760 40 'Ответы независимых сервисов, состояние прокси и активные адаптеры туннеля.' 10 $muted | Out-Null
 $tbDiag = New-Ctl TextBox 0 90 770 260; $tbDiag.Multiline = $true; $tbDiag.ReadOnly = $true; $tbDiag.ScrollBars = 'Vertical'
 $tbDiag.Font = New-Object Drawing.Font('Consolas',10); $diag.Controls.Add($tbDiag)
 $btnDiag = New-Ctl Button 0 364 180 34 'Обновить'; $diag.Controls.Add($btnDiag)
 $btnExport = New-Ctl Button 194 364 230 34 'Экспорт диагностики…'; $diag.Controls.Add($btnExport)
 Label-At $diag 0 410 770 28 'Отчёт содержит ваши IP и имена приложений. Перед передачей проверьте его.' 9 $muted | Out-Null
 function Format-Verdict($v) {
-    switch ($v) { 'yes' { 'через VPN' } 'ok' { 'через VPN' } 'no' { 'УТЕЧКА' } 'leak' { 'УТЕЧКА' } 'unavailable' { 'IPv6 нет' } 'off' { 'выключено' } default { 'не определено' } }
+    switch ($v) { 'yes' { 'через туннель' } 'ok' { 'через туннель' } 'no' { 'УТЕЧКА' } 'leak' { 'УТЕЧКА' } 'unavailable' { 'IPv6 нет' } 'off' { 'выключено' } default { 'не определено' } }
 }
 function Format-ExtraDiagnostics {
     $out = @('МАРШРУТ ДО СЕРВИСОВ (адрес, который видит сам сервис)')
@@ -172,13 +174,13 @@ function Format-ExtraDiagnostics {
         $out += ("DNS: {0}  ({1:HH:mm:ss}, источники: Akamai whoami, Google myaddr)" -f (Format-Verdict $d.State), $d.Time)
         foreach ($r in $d.Resolvers) { $out += ("  резолвер {0} {1} - {2}" -f $r.Ip, $r.Country, (Format-Verdict $r.Verdict)) }
         foreach ($e in $d.Errors) { $out += "  ошибка: $e" }
-        if ($d.State -eq 'leak') { $out += $(if ($Cfg.dns_check -eq 'block') { '  Режим block: программы блокируются.' } else { '  Режим warn: только предупреждение. Исправляется в VPN: DNS через туннель или режим TUN.' }) }
+        if ($d.State -eq 'leak') { $out += $(if ($Cfg.dns_check -eq 'block') { '  Режим block: программы блокируются.' } else { '  Режим warn: только предупреждение. Исправляется в настройках туннеля: DNS через туннель или режим TUN.' }) }
     }
     $out += "IPv6: $(Format-Verdict $script:ipv6Verdict)$(if ($script:lastIpv6) { " ($script:lastIpv6)" })"
     return ($out -join "`r`n")
 }
 function Refresh-Diagnostics {
-    $lines = @("VPNGuard 2.0  |  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')", '', "Состояние: $script:statusText",
+    $lines = @("AiGuard 2.0  |  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')", '', "Состояние: $script:statusText",
         "Последний IP: $script:lastIp", "Страна: $script:lastCountry", '', 'ОТВЕТЫ СЕРВИСОВ')
     $lines[-1] = "ОТВЕТЫ СЕРВИСОВ (маршрут проб: $($Cfg.probe_route))"
     foreach ($r in $script:serviceResults) {
@@ -190,16 +192,145 @@ function Refresh-Diagnostics {
     $lines += @('', "Прокси: $(if ($px) { $px } else { 'не задан' })", "Активных TUN-адаптеров: $(@(Get-TunAdapters).Count)",
         "Приложения: $($Apps -join ', ')", '', "IPv6: $(switch ($script:ipv6Status) { 'ok' { "виден адрес $script:lastIpv6" } 'unavailable' { 'на компьютере нет IPv6' } 'unknown' { 'пробы не ответили' } default { 'проверка выключена' } })",
         '', (Format-ExtraDiagnostics),
-        'Расхождение IP-сервисов — причина блокировки, но само по себе не доказывает утечку.')
+        'Расхождение IP-сервисов — причина блокировки, но само по себе не доказывает утечку.', '',
+        'KILL SWITCH (БРАНДМАУЭР)', (Format-VGFwSummary $script:fwStatus))
+    if ($script:fwStatus -and @($script:fwStatus.rules).Count) {
+        foreach ($r in @($script:fwStatus.rules)) { $lines += "  $($r.app): $($r.program)" }
+        $lines += "  Блок на адаптерах: $(@($script:fwStatus.aliases) -join ', ')"
+    }
+    foreach ($p in (Get-VGFwUncovered $script:fwStatus (Get-VGFwApps $Apps $Cfg.firewall_exclude))) { $lines += "  НЕ ЗАЩИЩЕНО (запущено, правила ещё нет): $p" }
     $tbDiag.Lines = $lines
 }
 $btnDiag.Add_Click({ Refresh-Diagnostics; Check-Now })
 $btnExport.Add_Click({
     Refresh-Diagnostics
-    $d = New-Object Windows.Forms.SaveFileDialog; $d.Filter = 'Текстовый отчёт|*.txt'; $d.FileName = 'VPNGuard-diagnostics.txt'
-    if ($d.ShowDialog() -eq 'OK') { try { [IO.File]::WriteAllText($d.FileName,$tbDiag.Text,[Text.Encoding]::UTF8); $lblSaved.Text = 'Отчёт сохранён' } catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message,'VPNGuard') | Out-Null } }
+    $d = New-Object Windows.Forms.SaveFileDialog; $d.Filter = 'Текстовый отчёт|*.txt'; $d.FileName = 'AiGuard-diagnostics.txt'
+    if ($d.ShowDialog() -eq 'OK') { try { [IO.File]::WriteAllText($d.FileName,$tbDiag.Text,[Text.Encoding]::UTF8); $lblSaved.Text = 'Отчёт сохранён' } catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message,'AiGuard') | Out-Null } }
     $d.Dispose()
 })
+
+# ================= Аварийный выключатель (брандмауэр) =================
+# Под выключателем все программы, отмеченные на вкладке «Приложения», кроме снятых здесь галочек.
+# Правила меняет Firewall.ps1 с правами администратора; окно спрашивает, запускает его или задачу планировщика.
+Label-At $fwPage 0 0 760 32 'Аварийный выключатель' 18 | Out-Null
+Label-At $fwPage 0 40 770 70 "Отмеченные программы выходят в интернет только через защищённое соединение.`nПропало соединение — их запросам просто некуда уйти. Работает через брандмауэр Windows;`nпри включении и выключении Windows спросит права администратора." 10 $muted | Out-Null
+$chkFw = New-Ctl CheckBox 0 118 560 32 'Включить аварийный выключатель'
+$chkFw.Font = New-Object Drawing.Font('Segoe UI',12,[Drawing.FontStyle]::Bold); $fwPage.Controls.Add($chkFw)
+Label-At $fwPage 0 160 360 24 'Под выключателем:' 10 | Out-Null
+$clbFw = New-Ctl CheckedListBox 0 188 360 136; $clbFw.CheckOnClick = $true; $fwPage.Controls.Add($clbFw)
+$btnFwApply = New-Ctl Button 380 188 280 34 'Применить список'; $fwPage.Controls.Add($btnFwApply)
+Label-At $fwPage 380 230 390 96 'Список — программы с вкладки «Приложения». Снимите галочку, если программе можно работать и без защиты. Сайт в браузере выключатель не закрывает.' 9 $muted | Out-Null
+$lblFwStatus = Label-At $fwPage 0 338 770 96 '' 10
+$script:fwSuppress = $false; $script:fwPending = $null
+
+function Test-FwOn { [bool]($script:fwStatus -and $script:fwStatus.installed -ne $false -and @($script:fwStatus.rules).Count -gt 0) }
+function Get-FwLabel($n) { if ($Presets.Contains($n)) { "$($Presets[$n])  [$n]" } else { "$n  [$n]" } }
+function Get-FwNames($list) { (@($list) | % { if ($Presets.Contains($_)) { $Presets[$_] } else { $_ } }) -join ', ' }
+function Get-FwChecked { @($clbFw.CheckedItems | % { if ([string]$_ -match '\[([^\]]+)\]$') { $Matches[1] } }) }
+function Get-FwUnchecked { @($clbFw.Items | ? { -not $clbFw.CheckedItems.Contains($_) } | % { if ([string]$_ -match '\[([^\]]+)\]$') { $Matches[1] } }) }
+function Update-FwStatusLabel {
+    $t = Format-VGFwSummary $script:fwStatus
+    if ($script:fwStatus -and $script:fwStatus.error) { $t += "`nПоследняя попытка не удалась: $($script:fwStatus.error)" }
+    $unc = @(Get-VGFwUncovered $script:fwStatus (Get-VGFwApps $Apps $Cfg.firewall_exclude))
+    if ((Test-FwOn) -and $unc.Count) { $t += "`nЗапущено, но ещё не под выключателем (обновится в течение 15 минут): " + ($unc -join '; ') }
+    if ($script:fwPending) { $t = 'Применяю изменения… Если Windows спросит права администратора — подтвердите.' }
+    $lblFwStatus.Text = $t
+}
+function Fill-FwPage {
+    $script:fwSuppress = $true
+    $clbFw.Items.Clear()
+    foreach ($n in @($Apps | ? { $_ } | Sort-Object -Unique)) {
+        $i = $clbFw.Items.Add((Get-FwLabel $n)); $clbFw.SetItemChecked($i, (@($Cfg.firewall_exclude) -notcontains $n))
+    }
+    # Пока изменение применяется, переключатель показывает то, что выбрал человек, а не старое состояние.
+    $chkFw.Checked = if ($script:fwPending) { $script:fwPending.mode -ne 'Uninstall' } else { Test-FwOn }
+    $chkFw.Enabled = -not $script:fwPending; $btnFwApply.Enabled = -not $script:fwPending
+    $script:fwSuppress = $false
+    Update-FwStatusLabel
+}
+# Вопрос и запуск вынесены в переменные, чтобы самопроверка подменяла их без окон и UAC.
+$script:FwConfirm = { param($text) [Windows.Forms.MessageBox]::Show($text,'AiGuard: аварийный выключатель',[Windows.Forms.MessageBoxButtons]::YesNo,[Windows.Forms.MessageBoxIcon]::Warning,[Windows.Forms.MessageBoxDefaultButton]::Button2) -eq [Windows.Forms.DialogResult]::Yes }
+$script:FwLaunch = { param($mode)
+    if ($mode -eq 'Sync') {
+        # Задача планировщика уже от администратора: запуск без нового запроса прав.
+        Start-ScheduledTask -TaskName 'VPNGuard Kill Switch' -ErrorAction Stop
+        return
+    }
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',('"{0}"' -f (Join-Path $Here 'Firewall.ps1')),"-$mode",'-UserProfile',('"{0}"' -f $env:USERPROFILE))
+    Start-Process -FilePath $ps -Verb RunAs -WindowStyle Hidden -ArgumentList $argList | Out-Null
+}
+function Invoke-FwChange($mode) {
+    $before = if ($script:fwStatus) { [string]$script:fwStatus.time } else { '' }
+    try { & $script:FwLaunch $mode }
+    catch {
+        if ($mode -eq 'Sync') { return (Invoke-FwChange 'Install') }
+        Log "Аварийный выключатель: запуск отменён ($($_.Exception.Message))"
+        [Windows.Forms.MessageBox]::Show('Изменение отменено: Windows не дала права администратора.','AiGuard') | Out-Null
+        return $false
+    }
+    $script:fwPending = @{ mode = $mode; before = $before; until = (Get-Date).AddSeconds(90) }
+    Log "Аварийный выключатель: запущено $mode"
+    Fill-FwPage
+    return $true
+}
+function Poll-FwChange {
+    if (-not $script:fwPending) { return }
+    $s = Read-VGFwStatus $FwStatusPath
+    $now = if ($s) { [string]$s.time } else { '' }
+    if ($now -and $now -ne $script:fwPending.before) {
+        $script:fwStatus = $s; $script:fwPending = $null
+        if ($s.error) {
+            Log "Аварийный выключатель: ошибка — $($s.error)"
+            Fill-FwPage
+            [Windows.Forms.MessageBox]::Show("Не получилось: $($s.error)`n`nПодробности: $(Join-Path $Here 'firewall.log')",'AiGuard') | Out-Null
+            return
+        }
+        $summary = Format-VGFwSummary $s
+        Log "Аварийный выключатель: $summary"; Notify $summary
+        Fill-FwPage
+    } elseif ((Get-Date) -gt $script:fwPending.until) {
+        $script:fwPending = $null
+        Log 'Аварийный выключатель: Firewall.ps1 не ответил за 90 с'
+        Fill-FwPage
+        [Windows.Forms.MessageBox]::Show("Изменение не применилось. Подробности: $(Join-Path $Here 'firewall.log')",'AiGuard') | Out-Null
+    }
+}
+function Undo-FwToggle { $script:fwSuppress = $true; $chkFw.Checked = -not $chkFw.Checked; $script:fwSuppress = $false }
+function Get-FwEnableText($list) {
+    "Вы точно уверены?`n`nПосле включения программы ($(Get-FwNames $list)) смогут выходить в интернет только через защищённое соединение. Если оно выключено или оборвалось, программы не будут работать, пока оно не вернётся или вы не выключите аварийный выключатель на вкладке «Брандмауэр».`n`nWindows попросит права администратора. Включить?"
+}
+$chkFw.Add_CheckedChanged({
+    if ($script:fwSuppress) { return }
+    if ($chkFw.Checked) {
+        $chosen = @(Get-FwChecked)
+        if ($chosen.Count -eq 0) { Undo-FwToggle; [Windows.Forms.MessageBox]::Show('Отметьте хотя бы одну программу в списке.','AiGuard') | Out-Null; return }
+        if (-not (& $script:FwConfirm (Get-FwEnableText $chosen))) { Undo-FwToggle; return }
+        $Cfg.firewall_exclude = @(Get-FwUnchecked); $Cfg.firewall_asked = $true; Save-Config
+        if (-not (Invoke-FwChange 'Install')) { Undo-FwToggle }
+    } else {
+        $text = "Выключить аварийный выключатель?`n`nПрограммы снова смогут выходить в интернет напрямую, мимо защищённого соединения. При обрыве останется только заморозка программ.`n`nWindows попросит права администратора. Выключить?"
+        if (-not (& $script:FwConfirm $text)) { Undo-FwToggle; return }
+        if (-not (Invoke-FwChange 'Uninstall')) { Undo-FwToggle }
+    }
+})
+$btnFwApply.Add_Click({
+    $Cfg.firewall_exclude = @(Get-FwUnchecked); Save-Config
+    if (Test-FwOn) {
+        if (@(Get-FwChecked).Count -eq 0) { [Windows.Forms.MessageBox]::Show('Чтобы снять стену со всех программ, выключите аварийный выключатель.','AiGuard') | Out-Null; return }
+        [void](Invoke-FwChange 'Sync')
+    } else { $lblSaved.Text = 'Список сохранён. Включите аварийный выключатель, чтобы он заработал.' }
+})
+# Первый запуск: предложить включить выключатель для отмеченных программ.
+function Ask-FirstRunFirewall {
+    if ($Cfg.firewall_asked -or (Test-FwOn)) { return }
+    $chosen = @(Get-VGFwApps $Apps $Cfg.firewall_exclude)
+    # Программ ещё нет (чистая установка) — спросим, когда человек их отметит и сохранит.
+    if ($chosen.Count -eq 0) { return }
+    $Cfg.firewall_asked = $true; Save-Config
+    $text = "Включить аварийный выключатель?`n`nОтмеченные программы ($(Get-FwNames $chosen)) будут выходить в интернет только через защищённое соединение: при обрыве их запросам некуда уйти. Включить или выключить можно в любой момент на вкладке «Брандмауэр».`n`nWindows попросит права администратора."
+    if (& $script:FwConfirm $text) { [void](Invoke-FwChange 'Install') }
+}
 
 $lblSaved.SetBounds(244,703,480,34)
 $btnSave.SetBounds(738,696,170,42); $btnSave.Text = 'Сохранить'
@@ -220,9 +351,9 @@ function Update-Dashboard {
     $last = if ($script:lastChecked) { $script:lastChecked.ToString('HH:mm:ss') } else { 'ещё не завершена' }
     $lblSubtitle.Text = 'Последняя проверка: ' + $last
     $uptime = (Get-Date) - $script:startedAt
-    $lblActivity.Text = "Сеанс: $([int]$uptime.TotalHours) ч $($uptime.Minutes) мин   •   Заморожено процессов: $($frozen.Count)`nКонтроль IP: каждые $($Cfg.interval_sec) с   •   IP / подсетей: $($Cfg.allow_ips.Count)   •   Стран: $($Cfg.allow_countries.Count)"
+    $lblActivity.Text = "Сеанс: $([int]$uptime.TotalHours) ч $($uptime.Minutes) мин   •   Заморожено процессов: $($frozen.Count)`nОбрыв соединения: 0,25 с   •   внешний IP: каждые $($Cfg.interval_sec) с   •   IP / подсетей: $($Cfg.allow_ips.Count)   •   Стран: $($Cfg.allow_countries.Count)"
     $policy = if (-not $Cfg.kill_after_grace) { 'Заморозка до восстановления' } elseif ($Cfg.grace_sec -gt 0) { "Заморозка → закрытие через $($Cfg.grace_sec) с" } else { 'Немедленное закрытие' }
-    $lblPolicy.Text = "Общее правило: $policy. Индивидуальных правил: $($Cfg.app_actions.Count).`nКонтроль процессов не заменяет сетевой kill switch VPN-клиента."
+    $lblPolicy.Text = "Общее правило: $policy. Индивидуальных правил: $($Cfg.app_actions.Count).`n$(Format-VGFwSummary $script:fwStatus)"
     if ($script:state -eq 'paused') {
         $lblDetail.Text = if ($script:pauseUntil) { 'Автовключение защиты через ' + [Math]::Max(0,[int]($script:pauseUntil-(Get-Date)).TotalSeconds) + ' с' } else { 'Включите защиту вручную, когда закончите.' }
     }

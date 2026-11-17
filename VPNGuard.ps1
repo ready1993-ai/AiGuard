@@ -1,4 +1,4 @@
-﻿# VPN Guard — контроль выбранных процессов по состоянию соединения.
+﻿# AiGuard — контроль выбранных программ по состоянию защищённого соединения.
 # Пропал VPN - Claude, ChatGPT и другие выбранные программы закрываются (или ставятся на паузу).
 # Настройки - в окне: двойной щелчок по значку в трее или ярлык VPNGuard на рабочем столе.
 param(
@@ -22,7 +22,10 @@ if ($SelfTest -or $Preview) {
 }
 
 $RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-$RunValue = 'wscript.exe "' + (Join-Path $Here 'Запуск VPNGuard.vbs') + '" /background'
+# Ярлык запуска: в новых сборках «Запуск AiGuard.vbs», в старых — «Запуск VPNGuard.vbs»
+$Launcher = @('Запуск AiGuard.vbs','Запуск VPNGuard.vbs') | ? { Test-Path -LiteralPath (Join-Path $Here $_) } | Select-Object -First 1
+if (-not $Launcher) { $Launcher = 'Запуск AiGuard.vbs' }
+$RunValue = 'wscript.exe "' + (Join-Path $Here $Launcher) + '" /background'
 
 # --- один экземпляр; повторный запуск просто открывает окно у уже работающего
 $instanceSuffix = if ($SelfTest -or $Preview) { '_test_' + $PID } else { '' }
@@ -39,6 +42,10 @@ Add-Type -AssemblyName System.Net.Http
 Add-Type -Path (Join-Path $Here 'NetworkMonitor.cs')
 Add-Type -Path (Join-Path $Here 'ProcessTree.cs')
 Add-Type -Path (Join-Path $Here 'ProbeEngine.cs')
+# Сетевой kill switch (брандмауэр): только чтение состояния, правила меняет Firewall.ps1
+. (Join-Path $Here 'FirewallCore.ps1')
+$FwStatusPath = Join-Path $Here 'state\firewall-status.json'
+$fwStatus = $null; $fwNext = Get-Date; $fwAskAt = $null
 Add-Type @"
 using System; using System.Runtime.InteropServices;
 public static class VGNt {
@@ -90,6 +97,11 @@ function Load-Config {
             foreach ($value in $c.$list) { if ($value -isnot [string] -or $value -notmatch '^https?://') { throw "Поле ${list}: адреса должны начинаться с http:// или https://." } }
         }
     }
+    if ($null -ne $c.PSObject.Properties['firewall_exclude']) {
+        if ($c.firewall_exclude -isnot [Array]) { throw 'Поле firewall_exclude должно быть массивом.' }
+        foreach ($value in $c.firewall_exclude) { if ($value -isnot [string]) { throw 'Поле firewall_exclude содержит значение другого типа.' } }
+    }
+    if ($null -ne $c.PSObject.Properties['firewall_asked'] -and $c.firewall_asked -isnot [bool]) { throw 'Поле firewall_asked должно быть true или false.' }
     if ($null -ne $c.PSObject.Properties['dns_check'] -and $c.dns_check -notin @('warn','block','off')) { throw 'Поле dns_check: warn, block или off.' }
     foreach ($flag in @('kill_after_grace','watch_proxy','notifications','check_ipv6','route_check')) {
         if ($null -ne $c.PSObject.Properties[$flag] -and $c.$flag -isnot [bool]) { throw "Поле $flag должно быть true или false." }
@@ -116,7 +128,10 @@ function Load-Config {
         probe_route      = $(if ($c.probe_route) { [string]$c.probe_route } else { 'system' })
         route_check      = ($c.route_check -ne $false)
         dns_check        = $(if ($c.dns_check) { [string]$c.dns_check } else { 'warn' })
+        firewall_exclude = @($c.firewall_exclude | ? { $_ } | % { $_.ToLower() })
+        firewall_asked   = ($c.firewall_asked -eq $true)
     }
+    if ($null -ne $c.PSObject.Properties['firewall_paths']) { $Cfg.firewall_paths = $c.firewall_paths }
     if (-not $Cfg.ipv6_services) { $Cfg.ipv6_services = @('https://api6.ipify.org','https://ipv6.icanhazip.com','https://v6.ident.me') }
     if ($c.app_actions) { foreach ($prop in $c.app_actions.PSObject.Properties) { if ($prop.Value -in @('default','freeze','grace','kill')) { $Cfg.app_actions[$prop.Name] = $prop.Value } } }
     if (-not $Cfg.ip_services) { $Cfg.ip_services = @('https://api.ipify.org','https://ipv4.icanhazip.com','https://v4.ident.me','https://checkip.amazonaws.com') }
@@ -327,17 +342,17 @@ function Poll-ExtraChecks {
     $script:ipv6Verdict = $v6
     $problem = $null
     $leak = @($routes | ? { $_.Verdict -eq 'no' } | Select-Object -First 1)
-    if ($leak.Count) { $problem = "Маршрут до $($leak[0].App) мимо VPN: сервис видит $($leak[0].Seen)" }
-    elseif ($v6 -eq 'no') { $problem = "IPv6 мимо VPN: $script:lastIpv6" }
-    elseif ($dnsState -eq 'leak' -and $Cfg.dns_check -eq 'block') { $problem = "DNS мимо VPN: $(($resolvers | ? { $dnsVerdicts[$_] -eq 'no' }) -join ', ')" }
+    if ($leak.Count) { $problem = "Маршрут до $($leak[0].App) мимо защищённого соединения: сервис видит $($leak[0].Seen)" }
+    elseif ($v6 -eq 'no') { $problem = "IPv6 мимо защищённого соединения: $script:lastIpv6" }
+    elseif ($dnsState -eq 'leak' -and $Cfg.dns_check -eq 'block') { $problem = "DNS мимо защищённого соединения: $(($resolvers | ? { $dnsVerdicts[$_] -eq 'no' }) -join ', ')" }
     if ($dnsState -eq 'leak') {
         # резолверы одного провайдера меняют адреса: предупреждаем один раз на набор стран
         $key = (@($script:dnsResult.Resolvers | ? { $_.Verdict -eq 'no' } | % { $_.Country } | Sort-Object -Unique) -join ',')
         if ($key -ne $script:dnsWarned) {
             $script:dnsWarned = $key
             $list = ($script:dnsResult.Resolvers | ? { $_.Verdict -eq 'no' } | % { "$($_.Ip) $($_.Country)" }) -join ', '
-            Log "DNS идёт мимо VPN: $list"
-            if ($Cfg.dns_check -eq 'warn') { Notify "DNS-запросы идут мимо VPN ($list). Программы не блокируются: так настроено." 'Warning' }
+            Log "DNS идёт мимо защищённого соединения: $list"
+            if ($Cfg.dns_check -eq 'warn') { Notify "DNS-запросы идут мимо защищённого соединения ($list). Программы не блокируются: так настроено." 'Warning' }
         }
     } else { $script:dnsWarned = '' }
     $before = $script:extraProblem
@@ -489,8 +504,8 @@ function Action-Word {
 function Set-Bad($why) {
     if ($script:state -ne 'bad') {
         $script:incidentCount++
-        Log "VPN пропал: $why"
-        Notify "VPN пропал ($why). Применены правила защиты приложений." 'Warning'
+        Log "Соединение пропало: $why"
+        Notify "Защищённое соединение пропало ($why). Применены правила защиты приложений." 'Warning'
         $script:badSince = Get-Date
     }
     $script:state = 'bad'
@@ -502,7 +517,7 @@ function Set-Bad($why) {
 function Set-Good($ip, $cc) {
     # P04: подтверждённая утечка маршрута/IPv6/DNS не снимается, пока доп. проверка не пройдёт
     if ($script:extraProblem) { Set-Bad $script:extraProblem; return }
-    if ($script:state -eq 'bad') { Log "VPN вернулся: $ip $cc"; Notify 'VPN снова работает, программы разблокированы' }
+    if ($script:state -eq 'bad') { Log "Соединение вернулось: $ip $cc"; Notify 'Соединение снова защищено, программы разблокированы' }
     $script:badSince = $null
     $script:state = 'ok'
     $script:statusText = "Защита включена"
@@ -531,13 +546,13 @@ function Quick-Check {
     if (-not [System.Net.NetworkInformation.NetworkInterface]::GetIsNetworkAvailable()) { $why = 'сеть пропала' }
     elseif ($Cfg.watch_proxy -and $script:TunWhenGood.Count -gt 0) {
         $now = @(Get-TunAdapters)
-        if (@($script:TunWhenGood | ? { $now -notcontains $_ }).Count -gt 0) { $why = 'VPN-адаптер (TUN) отключился' }
+        if (@($script:TunWhenGood | ? { $now -notcontains $_ }).Count -gt 0) { $why = 'Адаптер туннеля (TUN) отключился' }
     }
     if (-not $why -and $Cfg.watch_proxy -and $script:ProxyWhenGood) {
         $cur = Get-Proxy
-        if (-not $cur) { $why = 'VPN-прокси выключен' }
+        if (-not $cur) { $why = 'Прокси туннеля выключен' }
         elseif ($cur -ne $script:ProxyWhenGood) { $why = "прокси сменился на $cur" }
-        elseif (-not (Test-ProxyAlive $cur)) { $why = 'VPN не отвечает (порт прокси закрыт)' }
+        elseif (-not (Test-ProxyAlive $cur)) { $why = 'Туннель не отвечает (порт прокси закрыт)' }
     }
     if ($why) { $script:pending = $null; $script:countryPending = $null; Set-Bad $why }
 }
@@ -592,7 +607,7 @@ function Poll-IpCheck {
 }
 function Finish-Check($ips) {
     if ($script:state -eq 'paused') { return }
-    if ($ForceBad) { Set-Bad 'тест: VPN считается отключённым'; return }
+    if ($ForceBad) { Set-Bad 'тест: соединение считается незащищённым'; return }
     $groups = @($ips | Group-Object | Sort-Object Count -Descending)
     if ($groups.Count -eq 0) { Set-Bad 'нет интернета / IP не узнать'; return }
     $ip = $groups[0].Name
@@ -635,7 +650,7 @@ $tray.Visible = $true
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $miStatus = $menu.Items.Add('Проверка...'); $miStatus.Enabled = $false
 [void]$menu.Items.Add('-')
-$miOpen = $menu.Items.Add('Открыть VPNGuard'); $miOpen.Font = New-Object System.Drawing.Font($miOpen.Font, [System.Drawing.FontStyle]::Bold)
+$miOpen = $menu.Items.Add('Открыть AiGuard'); $miOpen.Font = New-Object System.Drawing.Font($miOpen.Font, [System.Drawing.FontStyle]::Bold)
 $miPause = $menu.Items.Add('Пауза защиты')
 [void]$menu.Items.Add('-')
 $miExit = $menu.Items.Add('Выход')
@@ -644,7 +659,7 @@ $tray.ContextMenuStrip = $menu
 function Notify($text, $tip = 'Info') {
     if ($SelfTest -or $Preview) { return }
     if (-not $Cfg.notifications) { return }
-    $tray.BalloonTipTitle = 'VPNGuard'; $tray.BalloonTipText = $text; $tray.BalloonTipIcon = $tip
+    $tray.BalloonTipTitle = 'AiGuard'; $tray.BalloonTipText = $text; $tray.BalloonTipIcon = $tip
     $tray.ShowBalloonTip(4000)
 }
 
@@ -664,7 +679,7 @@ function New-Hint($parent, $x, $y, $w, $h, $text) {
 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'VPNGuard - защита при обрыве VPN'
+$form.Text = 'AiGuard - защита при обрыве соединения'
 $form.Font = $F
 $form.ClientSize = New-Object System.Drawing.Size(600, 560)
 $form.FormBorderStyle = 'FixedSingle'; $form.MaximizeBox = $false
@@ -687,7 +702,7 @@ $tLog = New-Object System.Windows.Forms.TabPage 'Журнал'
 $tabs.TabPages.AddRange(@($tApps, $tAllow, $tBeh, $tLog))
 
 # --- вкладка Программы
-New-Hint $tApps 12 10 550 36 'Отмеченные программы закрываются, когда VPN пропадает, и не запускаются, пока он не вернётся.' | Out-Null
+New-Hint $tApps 12 10 550 36 'Отмеченные программы закрываются, когда защищённое соединение пропадает, и не запускаются, пока оно не вернётся.' | Out-Null
 $clbApps = New-Ctl CheckedListBox 12 50 548 220; $clbApps.CheckOnClick = $true; $tApps.Controls.Add($clbApps)
 $lblAdd = New-Ctl Label 12 282 300 22 'Добавить свою программу (имя процесса):'; $lblAdd.Font = $FS; $tApps.Controls.Add($lblAdd)
 $cbProc = New-Ctl ComboBox 12 306 330 28; $cbProc.DropDownStyle = 'DropDown'; $tApps.Controls.Add($cbProc)
@@ -696,7 +711,7 @@ $btnDelApp = New-Ctl Button 458 304 102 30 'Убрать'; $tApps.Controls.Add($
 New-Hint $tApps 12 340 550 30 'В списке - запущенные сейчас программы. Можно выбрать или вписать имя без .exe.' | Out-Null
 
 # --- вкладка Где можно работать
-New-Hint $tAllow 12 8 550 36 'Программы работают, только если внешний IP есть в списке ИЛИ его страна разрешена. Остальное считается обрывом VPN.' | Out-Null
+New-Hint $tAllow 12 8 550 36 'Программы работают, только если внешний IP есть в списке ИЛИ его страна разрешена. Остальное считается обрывом соединения.' | Out-Null
 $g1 = New-Ctl GroupBox 12 46 268 318 'Разрешённые IP'; $tAllow.Controls.Add($g1)
 $lbIps = New-Ctl ListBox 10 24 248 180; $g1.Controls.Add($lbIps)
 $tbIp = New-Ctl TextBox 10 210 160 28; $g1.Controls.Add($tbIp)
@@ -712,12 +727,12 @@ $btnCurCc = New-Ctl Button 10 244 248 30 'Добавить текущую стр
 $btnDelCc = New-Ctl Button 10 278 248 30 'Убрать выбранную'; $g2.Controls.Add($btnDelCc)
 
 # --- вкладка Поведение
-$g3 = New-Ctl GroupBox 12 10 548 150 'Что делать, когда VPN пропал'; $tBeh.Controls.Add($g3)
+$g3 = New-Ctl GroupBox 12 10 548 150 'Что делать, когда соединение пропало'; $tBeh.Controls.Add($g3)
 $rbKill = New-Ctl RadioButton 14 26 520 26 'Закрывать программы сразу'; $g3.Controls.Add($rbKill)
 $rbGrace = New-Ctl RadioButton 14 58 250 26 'Сначала пауза, закрыть через'; $g3.Controls.Add($rbGrace)
 $nudGrace = New-Ctl NumericUpDown 268 58 64 26; $nudGrace.Minimum = 1; $nudGrace.Maximum = 600; $nudGrace.Value = 20; $g3.Controls.Add($nudGrace)
 $lblSec = New-Ctl Label 338 60 60 24 'секунд'; $g3.Controls.Add($lblSec)
-$rbFreeze = New-Ctl RadioButton 14 90 520 26 'Только пауза, не закрывать (оживут, когда VPN вернётся)'; $g3.Controls.Add($rbFreeze)
+$rbFreeze = New-Ctl RadioButton 14 90 520 26 'Только пауза, не закрывать (оживут, когда соединение вернётся)'; $g3.Controls.Add($rbFreeze)
 New-Hint $g3 32 118 500 24 'Пауза: окно программы замирает, но данные не теряются.' | Out-Null
 
 $chkProxy = New-Ctl CheckBox 14 172 548 26 'Мгновенно ловить обрыв (следить за прокси Happ / Hiddify и TUN-адаптером)'; $tBeh.Controls.Add($chkProxy)
@@ -726,7 +741,7 @@ $nudInt = New-Ctl NumericUpDown 214 204 60 26; $nudInt.Minimum = 3; $nudInt.Maxi
 $lblInt2 = New-Ctl Label 280 206 80 24 'секунд'; $tBeh.Controls.Add($lblInt2)
 $chkAuto = New-Ctl CheckBox 14 244 548 26 'Запускать вместе с Windows'; $tBeh.Controls.Add($chkAuto)
 $chkNotify = New-Ctl CheckBox 14 276 548 26 'Показывать уведомления'; $tBeh.Controls.Add($chkNotify)
-New-Hint $tBeh 14 312 548 50 'Если VPNGuard упадёт, он перезапустится сам. Совсем выключить - пункт «Выход» в меню значка у часов.' | Out-Null
+New-Hint $tBeh 14 312 548 50 'Если AiGuard упадёт, он перезапустится сам. Совсем выключить - пункт «Выход» в меню значка у часов.' | Out-Null
 
 # --- вкладка Журнал
 $tbLog = New-Ctl TextBox 8 8 556 320; $tbLog.Multiline = $true; $tbLog.ReadOnly = $true; $tbLog.ScrollBars = 'Vertical'
@@ -799,7 +814,7 @@ $btnDelApp.Add_Click({
     if ($i -lt 0) { return }
     if ($clbApps.Items[$i] -match '\[([^\]]+)\]$' -and $Presets.Contains($Matches[1])) { $clbApps.SetItemChecked($i, $false) } else { $clbApps.Items.RemoveAt($i) }
 })
-$addIp = { param($v) $v = $v.Trim(); if ((Test-IpRule ($v.Split('/')[0]) $v) -and -not $lbIps.Items.Contains($v)) { [void]$lbIps.Items.Add($v) } elseif ($v) { [System.Windows.Forms.MessageBox]::Show('Введите корректный IP или подсеть CIDR; дубликаты уже есть в списке.', 'VPNGuard') | Out-Null } }
+$addIp = { param($v) $v = $v.Trim(); if ((Test-IpRule ($v.Split('/')[0]) $v) -and -not $lbIps.Items.Contains($v)) { [void]$lbIps.Items.Add($v) } elseif ($v) { [System.Windows.Forms.MessageBox]::Show('Введите корректный IP или подсеть CIDR; дубликаты уже есть в списке.', 'AiGuard') | Out-Null } }
 $btnAddIp.Add_Click({ & $addIp $tbIp.Text; $tbIp.Text = '' })
 $btnCurIp.Add_Click({ if ($script:lastIp) { & $addIp $script:lastIp } })
 $btnDelIp.Add_Click({ if ($lbIps.SelectedIndex -ge 0) { $lbIps.Items.RemoveAt($lbIps.SelectedIndex) } })
@@ -813,12 +828,15 @@ $tabs.Add_SelectedIndexChanged({ if ($tabs.SelectedTab -eq $tLog) { Refresh-Log 
 
 $btnSave.Add_Click({
     if ($lbIps.Items.Count -eq 0 -and $lbCc.Items.Count -eq 0) {
-        $r = [System.Windows.Forms.MessageBox]::Show('Не разрешено ни одного IP и ни одной страны - защищённые программы будут закрыты всегда. Сохранить?', 'VPNGuard', 'YesNo', 'Warning')
+        $r = [System.Windows.Forms.MessageBox]::Show('Не разрешено ни одного IP и ни одной страны - защищённые программы будут закрыты всегда. Сохранить?', 'AiGuard', 'YesNo', 'Warning')
         if ($r -ne 'Yes') { return }
     }
     Read-Form
     try { Save-Config; Set-Autostart $chkAuto.Checked; Log 'Настройки сохранены'; $lblSaved.Text = 'Сохранено ' + (Get-Date -Format 'HH:mm:ss') }
-    catch { [System.Windows.Forms.MessageBox]::Show("Не удалось сохранить: $($_.Exception.Message)", 'VPNGuard') | Out-Null; return }
+    catch { [System.Windows.Forms.MessageBox]::Show("Не удалось сохранить: $($_.Exception.Message)", 'AiGuard') | Out-Null; return }
+    # Новые галочки в «Приложениях» сразу попадают под аварийный выключатель (без нового запроса прав).
+    if ((Test-FwOn) -and -not $script:fwPending) { [void](Invoke-FwChange 'Sync') }
+    elseif (-not $Cfg.firewall_asked -and @($Apps).Count -gt 0) { Ask-FirstRunFirewall }
     if ($script:state -ne 'paused') { Check-Now }
 })
 $btnClose.Add_Click({ $form.Hide() })
@@ -846,7 +864,7 @@ $btnCheck.Add_Click({ if ($script:state -eq 'paused') { return }; $lblIp.Text = 
 
 function Update-Ui {
     $tray.Icon = $icons[$script:state]
-    $t = "VPNGuard: $script:statusText"; if ($t.Length -gt 63) { $t = $t.Substring(0, 63) }
+    $t = "AiGuard: $script:statusText"; if ($t.Length -gt 63) { $t = $t.Substring(0, 63) }
     $tray.Text = $t
     $miStatus.Text = $script:statusText
     $miPause.Text = $(if ($script:state -eq 'paused') { 'Включить защиту' } else { 'Пауза защиты' })
@@ -864,7 +882,7 @@ $miOpen.Add_Click({ Show-Settings })
 $tray.Add_DoubleClick({ Show-Settings })
 $miPause.Add_Click({ Toggle-Pause })
 $miExit.Add_Click({
-    Resume-All; Log 'VPNGuard выключен'
+    Resume-All; Log 'AiGuard выключен'
     $tray.Visible = $false
     [System.Windows.Forms.Application]::Exit()
 })
@@ -889,6 +907,9 @@ $timer.Add_Tick({
         }
         if ($showEvent.WaitOne(0)) { Show-Settings }
         Update-PauseDeadline
+        if ((Get-Date) -ge $script:fwNext) { $script:fwStatus = Read-VGFwStatus $FwStatusPath; $script:fwNext = (Get-Date).AddSeconds(30) }
+        Poll-FwChange
+        if ($script:fwAskAt -and (Get-Date) -ge $script:fwAskAt) { $script:fwAskAt = $null; Ask-FirstRunFirewall }
         if ($script:tick % 4 -eq 0) { Update-Dashboard }
         if ($script:state -eq 'paused') { return }
         # Invalidate pre-change responses before any request can release processes.
@@ -908,13 +929,15 @@ $timer.Add_Tick({
 
 if ($SelfTest -or $Preview) { . (Join-Path $Here 'Verify.ps1'); exit 0 }
 
-Log ("VPNGuard запущен. Защищаю: {0}. Разрешено: IP {1}; страны {2}{3}" -f ($Apps -join ', '), ($Cfg.allow_ips -join ', '), ($Cfg.allow_countries -join ', '), $(if ($DryRun) { ' [ТЕСТ]' } else { '' }))
+Log ("AiGuard запущен. Защищаю: {0}. Разрешено: IP {1}; страны {2}{3}" -f ($Apps -join ', '), ($Cfg.allow_ips -join ', '), ($Cfg.allow_countries -join ', '), $(if ($DryRun) { ' [ТЕСТ]' } else { '' }))
 $adoptedAfterCrash = Restore-Journal
-if ($adoptedAfterCrash -gt 0) { Notify "VPNGuard перезапущен после сбоя. Программ на паузе: $adoptedAfterCrash, разморожу после проверки VPN." 'Warning' }
+if ($adoptedAfterCrash -gt 0) { Notify "AiGuard перезапущен после сбоя. Программ на паузе: $adoptedAfterCrash, разморожу после проверки соединения." 'Warning' }
 Write-EngineHeartbeat
 Update-Ui
 Start-IpCheck
 [VPNGuardNetworkMonitor]::Start()
+$fwStatus = Read-VGFwStatus $FwStatusPath
+if (-not $Cfg.firewall_asked -and -not ($fwStatus -and $fwStatus.installed -ne $false -and @($fwStatus.rules).Count)) { $fwAskAt = (Get-Date).AddSeconds(4) }
 $timer.Start()
 if (-not $Background) { Show-Settings }
 try { [System.Windows.Forms.Application]::Run() }
