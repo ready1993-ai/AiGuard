@@ -384,6 +384,7 @@ $StateDir = if ($SelfTest -or $Preview) { Join-Path $Here 'verification/state' }
 New-Item -ItemType Directory -Force $StateDir | Out-Null
 $JournalPath = Join-Path $StateDir 'frozen.json'
 $HeartbeatPath = Join-Path $StateDir 'engine-heartbeat.txt'
+$journalPending = $false
 function Save-Journal {
     $entries = @(foreach ($id in @($frozen.Keys)) {
         $e = $frozen[$id]
@@ -391,9 +392,13 @@ function Save-Journal {
     })
     $tmp = "$JournalPath.tmp"
     try {
-        ConvertTo-Json -InputObject @($entries) -Depth 3 | Set-Content -Path $tmp -Encoding UTF8
-        Move-Item -Path $tmp -Destination $JournalPath -Force
-    } catch { Log "Журнал заморозок не записан: $($_.Exception.Message)" }
+        ConvertTo-Json -InputObject @($entries) -Depth 3 | Set-Content -Path $tmp -Encoding UTF8 -ErrorAction Stop
+        Move-Item -Path $tmp -Destination $JournalPath -Force -ErrorAction Stop
+        $script:journalPending = $false
+    } catch {
+        $script:journalPending = $true
+        Log "Журнал заморозок не записан: $($_.Exception.Message)"
+    }
 }
 function Restore-Journal {
     if (-not (Test-Path $JournalPath)) { return 0 }
@@ -416,27 +421,47 @@ function Write-EngineHeartbeat {
     try { [IO.File]::WriteAllText($HeartbeatPath, "$PID $([DateTime]::UtcNow.Ticks)") } catch {}
 }
 
+$protectedProcessNames = @(
+    'system', 'registry', 'smss', 'csrss', 'wininit', 'services', 'lsass', 'svchost',
+    'winlogon', 'logonui', 'dwm', 'explorer', 'sihost', 'taskmgr', 'ctfmon',
+    'shellexperiencehost', 'startmenuexperiencehost', 'searchhost',
+    'conhost', 'openconsole', 'windowsterminal', 'wt', 'wscript', 'cscript',
+    'codex-code-mode-host', 'codex-computer-use-swift', 'node_repl'
+)
+$engineSession = [Diagnostics.Process]::GetCurrentProcess().SessionId
+
 function Get-TargetProcs {
     $names = @($Apps)
     $processes = @{}
     $selected = @{}
     $script:processOwners = @{}
+    $parents = [VPNGuardProcessTree]::Parents()
+    $ancestors = @{}
+    $ancestorId = $PID
+    while ($ancestorId -gt 0 -and -not $ancestors.ContainsKey($ancestorId)) {
+        $ancestors[$ancestorId] = $true
+        $ancestorId = $parents[$ancestorId]
+    }
     foreach ($process in [Diagnostics.Process]::GetProcesses()) {
+        $name = $process.ProcessName.ToLowerInvariant()
+        if ($ancestors.ContainsKey($process.Id) -or $protectedProcessNames -contains $name) { continue }
+        # Other app presets are independent, even when launched by a protected app.
+        if ($Presets.Contains($name) -and $names -notcontains $name) { continue }
         $processes[$process.Id] = $process
-        if ($process.Id -ne $PID -and $names -contains $process.ProcessName.ToLower()) {
+        if ($names -contains $name -and $process.SessionId -eq $engineSession) {
             $selected[$process.Id] = $process
-            $script:processOwners[$process.Id] = $process.ProcessName.ToLower()
+            $script:processOwners[$process.Id] = $name
         }
     }
-    $parents = [VPNGuardProcessTree]::Parents()
     do {
         $added = $false
         foreach ($childId in $parents.Keys) {
             $parentId = $parents[$childId]
-            if ($childId -eq $PID -or $selected.ContainsKey($childId) -or -not $selected.ContainsKey($parentId) -or -not $processes.ContainsKey($childId)) { continue }
+            if ($selected.ContainsKey($childId) -or -not $selected.ContainsKey($parentId) -or -not $processes.ContainsKey($childId)) { continue }
             try {
-                if ($processes[$childId].StartTime -lt $selected[$parentId].StartTime) { continue }
-                $selected[$childId] = $processes[$childId]
+                $child = $processes[$childId]
+                if ($child.SessionId -ne $engineSession -or $child.StartTime -lt $selected[$parentId].StartTime) { continue }
+                $selected[$childId] = $child
                 $script:processOwners[$childId] = $script:processOwners[$parentId]
                 $added = $true
             } catch { }
@@ -445,21 +470,22 @@ function Get-TargetProcs {
     return $selected.Values
 }
 function Freeze-All($Processes = @(Get-TargetProcs)) {
+    $countBefore = $frozen.Count
     foreach ($p in $Processes) {
         if ($frozen.ContainsKey($p.Id)) { continue }
         if ($DryRun) { Log "[тест] заморозил бы $($p.ProcessName) ($($p.Id))"; $frozen[$p.Id] = $p.ProcessName; continue }
         try { $rc = [VGNt]::NtSuspendProcess($p.Handle); if ($rc -ne 0) { throw "NtSuspendProcess: $rc" }; $frozen[$p.Id] = @{ Name=$p.ProcessName; Start=$p.StartTime.Ticks }; Log "Заморожено: $($p.ProcessName) ($($p.Id))" }
         catch { Log "Не удалось заморозить $($p.ProcessName): $($_.Exception.Message)" }
     }
-    Save-Journal
+    if ($frozen.Count -ne $countBefore) { Save-Journal }
 }
 function Kill-All($Processes = @(Get-TargetProcs)) {
+    $countBefore = $frozen.Count
     foreach ($p in $Processes) {
         if ($DryRun) { Log "[тест] закрыл бы $($p.ProcessName) ($($p.Id))"; continue }
-        try { $p.Kill(); Log "Закрыто: $($p.ProcessName) ($($p.Id))" } catch {}
-        $frozen.Remove($p.Id)
+        try { $p.Kill(); $frozen.Remove($p.Id); Log "Закрыто: $($p.ProcessName) ($($p.Id))" } catch {}
     }
-    Save-Journal
+    if ($frozen.Count -ne $countBefore) { Save-Journal }
 }
 function Resume-All {
     $live = @{}
@@ -482,12 +508,16 @@ function Enforce {
     if ($script:state -eq 'checking') { Freeze-All; return }
     if ($script:state -ne 'bad') { return }
     $elapsed = ((Get-Date) - $script:badSince).TotalSeconds
+    $toFreeze = [Collections.Generic.List[Diagnostics.Process]]::new()
+    $toKill = [Collections.Generic.List[Diagnostics.Process]]::new()
     foreach ($p in @(Get-TargetProcs)) {
         $owner = $script:processOwners[$p.Id]
         if (-not $owner) { $owner = $p.ProcessName.ToLower() }
         $action = Get-AppAction $owner $elapsed
-        if ($action -eq 'kill') { Kill-All @($p) } else { Freeze-All @($p) }
+        if ($action -eq 'kill') { $toKill.Add($p) } else { $toFreeze.Add($p) }
     }
+    Freeze-All $toFreeze
+    Kill-All $toKill
 }
 
 function Get-AppAction($name, $elapsed) {
@@ -900,7 +930,10 @@ $timer.Add_Tick({
             [VPNGuardNetworkMonitor]::Signal()
         }
         $script:lastTickAt = $tickNow
-        if ($script:tick % 8 -eq 0) { Write-EngineHeartbeat }
+        if ($script:tick % 8 -eq 0) {
+            Write-EngineHeartbeat
+            if ($script:journalPending) { Save-Journal }
+        }
         if ($quitEvent.WaitOne(0)) {
             $timer.Stop(); Resume-All; Log 'Штатное завершение по сигналу перезапуска'
             $tray.Visible = $false; [System.Windows.Forms.Application]::Exit(); return
